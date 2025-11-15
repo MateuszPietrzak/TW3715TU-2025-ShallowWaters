@@ -51,7 +51,7 @@ function create_residual_function_1D(N, sin_eq_str, cos_expr_str)
 
         # Inner points:
         for i_local in 2:$(N)
-            F_A[i_local] = ($sin_eq_str) - 100 * exp(-40(i_local * dx)^2)
+            F_A[i_local] = ($sin_eq_str) - 1000 * exp(-40(i_local * dx)^2)
             F_B[i_local] = ($cos_expr_str) 
         end
 

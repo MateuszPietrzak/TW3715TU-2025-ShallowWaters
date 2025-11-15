@@ -12,7 +12,7 @@ with cubic damping. Below are animations showing the final results.
 For more details refer to the notebook.
 
 ### Harmonic Balance solution 
-![HB 1D](1D_HB_wave.gif)
+![HB 1D](figures/1D_HB_wave.gif)
 
 ### Finite Difference solution
-![FD 1D](1D_FD_wave.gif)
+![FD 1D](figures/1D_FD_wave.gif)
