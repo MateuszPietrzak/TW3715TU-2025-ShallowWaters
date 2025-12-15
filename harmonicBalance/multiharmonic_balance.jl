@@ -99,14 +99,18 @@ function solve_harmonicbalance(eqs, harmonics, bcs, domains, stepx, vars, vars_s
     domains = [x ∈ Interval(xleft, xright)];
 
     # Create the PDESystem
-    Model.@named pde_system = Model.PDESystem(eqs, bcs, domains, [vars], vars_symb);
+    Model.@named pdesys = Model.PDESystem(eqs, bcs, domains, [vars], vars_symb);
 
     # Discretization
     discretization = MOLFiniteDifference([x => stepx], nothing, approx_order=2);
 
     # Convert to NonlinearProblem
-    prob = discretize(pde_system, discretization);
-
+    sys, tspan = SciMLBase.symbolic_discretize(pdesys, discretization);
+    
+    sys = Model.complete(sys)
+    
+    prob = NonlinearProblem(sys, ones(length(Model.get_eqs(sys))); discretization.kwargs...);
+    
     # Remake and solve
     prob_new = remake(prob, u0=x0)
     sol = NonlinearSolve.solve(prob_new, NewtonRaphson(), reltol=1e-5, abstol=1e-5)
