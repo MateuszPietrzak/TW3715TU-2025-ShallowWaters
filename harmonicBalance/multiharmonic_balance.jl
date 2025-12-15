@@ -116,8 +116,8 @@ function make_residual(expanded, harmonics, omega, t)
     for i in 1:harmonics
         sin_coef = Symb.coeff(expanded, sin(i*omega*t));
         cos_coef = Symb.coeff(expanded, cos(i*omega*t));
-        push!(eqs, sin_coef ~ 0)
-        push!(eqs, cos_coef ~ 0)
+        push!(eqs, sin_coef)
+        push!(eqs, cos_coef)
     end
     return eqs
 end
