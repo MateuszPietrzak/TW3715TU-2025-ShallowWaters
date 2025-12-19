@@ -146,12 +146,12 @@ function expand_trig_jl(eqn, t, omega)
 end
 
 function make_residual(expanded, harmonics, omega, t)
-    eqs = Equation[]
+    eqs = Num[]
     for i in 1:harmonics
         sin_coef::Num = Symb.coeff(expanded, sin(i*omega*t))
         cos_coef::Num = Symb.coeff(expanded, cos(i*omega*t))
-        push!(eqs, sin_coef ~ 0)
-        push!(eqs, cos_coef ~ 0)
+        push!(eqs, sin_coef)
+        push!(eqs, cos_coef)
     end
     return eqs
 end
@@ -194,48 +194,62 @@ end
 
 
 # Implementing with the custom stencil
-function solve_harmonicbalance_DiffEq(eqs, harmonics::Int, bcs, domains, steps, vars, vars_symb, x0)
-    ndims = length(vars)
-    
-    domain_specs = [vars[i] ∈ Interval(domains[i]...) for i in 1:ndims]
-    
-    @named pdesys = PDESystem(eqs, bcs, domain_specs, collect(vars), vars_symb)
-    
-    disc_dict = Dict(vars[i] => steps[i] for i in 1:ndims)
-    discretization = MOLFiniteDifference(disc_dict, nothing; approx_order=2)
-    
-    prob = discretize(pdesys, discretization)  # Use discretize for NonlinearProblem
-    
-    prob_with_u0 = remake(prob; u0=x0)
-    
-    sol = solve(prob_with_u0, NewtonRaphson(); reltol=1e-5, abstol=1e-5)
-    
-    solution_coeffs = [Vector{Float64}(sol[vars_symb[i]]) for i in 1:(2*harmonics)]
-    
-    return solution_coeffs
+using MacroTools: prewalk, @capture
+using Symbolics: Differential
+
+function transform_sym(Nx::Int64, Ny::Int64)
+    function aux(ex)
+        prewalk(ex) do tmp
+            if @capture(tmp, Differential(x)(Differential(x)(s_(x, y))))
+                return :(($s[i+1] - 2*$s[i] + $s[i-1]) / dx^2)
+                
+            elseif @capture(tmp, Differential(y)(Differential(y)(s_(x, y))))
+                return :(($s[i+Nx+1] - 2*$s[i] + $s[i-Nx-1]) / dy^2)
+                
+            elseif @capture(tmp, Differential(x)(s_(x, y)))
+                return :(($s[i+1] - $s[i-1]) / (2*dx))
+                
+            elseif @capture(tmp, Differential(y)(s_(x, y)))
+                return :(($s[i+Nx+1] - $s[i-Nx-1]) / (2*dy))
+                
+            elseif @capture(tmp, s_(x, y))
+                return :($s[i])
+                
+            end
+            tmp
+        end
+    end
+    aux
 end
 
-# using Plots
-# anim = @animate for t in 1:0.1:10
-#     if t % 100 == 0
-#         println(t)
-#     end
-
-#     u_new = solution_coeffs[1]*0.0
-#     j = 1
-#     for i in 1:(2*harmonics)
-#         if isodd(i)
-#             u_new .+= solution_coeffs[i] .* sin(j * omega * t)
-#         else
-#             u_new .+= solution_coeffs[i] .* cos(j * omega * t)
-#             j += 1
-#         end
-#     end
+function create_residual_function(Nx, Ny, eqs::Vector{Expr}, vars::Vector{Symbol})
+    nvars = length(vars)
+    N = (Nx+1) * (Ny+1)
     
+    quote
+        function residual!(R, U, p)  # R instead of F
+            dx, dy = p
+            Nx = $Nx
+            
+            $([:($(vars[k]) = view(U, $((k-1)*N+1):$(k*N))) for k in 1:nvars]...)
+            $([:($(Symbol("R_", vars[k])) = view(R, $((k-1)*N+1):$(k*N))) for k in 1:nvars]...)
+            
+            for j in 1:$Ny+1
+                for ii in 1:$Nx+1
+                    i = ii + (j-1) * ($Nx+1)
+                    x = (ii-1) * dx
+                    y = (j-1) * dy
+                    
+                    if ii == 1 || ii == $Nx+1 || j == 1 || j == $Ny+1
+                        $([:($(Symbol("R_", vars[k]))[i] = $(vars[k])[i]) for k in 1:nvars]...)
+                    else
+                        $([:($(Symbol("R_", vars[k]))[i] = $(eqs[k])) for k in 1:nvars]...)
+                    end
+                end
+            end
+            return R
+        end
+    end
+end
 
-#     heatmap(u_new, clims=(-0.1, 0.1))
-#     title!("(Solvetime = 296s) Wave Equation with H = $(harmonics), \$\\gamma\$ = $(gamma), \$\\gamma_3\$ = $(gamma3), \$\\omega\$ = $omega", titlefontsize=10)
 
-# end
-
-# gif(anim, "HB_WE_2D.gif", fps=30)
