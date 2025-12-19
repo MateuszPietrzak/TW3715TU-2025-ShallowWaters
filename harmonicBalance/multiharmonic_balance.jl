@@ -8,82 +8,41 @@ import ApproxFun as AF
 import DifferentialEquations as DE
 using Symbolics
 
-function create_ansatz(coords::Tuple, t::Symbolics.Num, omega, harmonics::Int)
-    var_names = [Symbol(Char('A' + i - 1)) for i in 1:(2*harmonics)]
-    
+function create_ansatz(coords::Tuple, t::Symbolics.Num, omega, harmonics::Int, n_fields::Int=1)
+    var_names = Symbol[]
     var_exprs = Symbolics.Num[]
+    fields = Symbolics.Num[]
     
-    u::Num = Num(0)
-    j = 1
+    letter_idx = 1
     
-    for (i, name) in enumerate(var_names)
-        v::Symbolics.CallWithMetadata{SymbolicUtils.FnType{Tuple, Real}, Base.ImmutableDict{DataType, Any}} = first(@variables $name(..))
-        expr::Num = v(coords...)
-
-        if isodd(i)
-            u += expr * sin(j * omega * t)
-        else
-            u += expr * cos(j * omega * t)
-            j += 1
+    for field_idx in 1:n_fields
+        u = Num(0)
+        j = 1
+        
+        for i in 1:(2*harmonics)
+            name = Symbol(Char('A' + letter_idx - 1))
+            letter_idx += 1
+            
+            v = first(@variables $name(..))
+            expr = v(coords...)
+            
+            if isodd(i)
+                u += expr * sin(j * omega * t)
+            else
+                u += expr * cos(j * omega * t)
+                j += 1
+            end
+            
+            push!(var_names, name)
+            push!(var_exprs, expr)
         end
         
-        push!(var_exprs, expr)
+        push!(fields, u)
     end
     
-    return var_names, var_exprs, u  # Return names instead of callables
+    return var_names, var_exprs, fields
 end
 
-function create_bcs(var_names::Vector{Symbol}, domains, indep_vars, bc)
-    ndims = length(domains)
-    bcs = Equation[]
-    
-    for name in var_names
-        # Recreate the callable from the name
-        v = first(@variables $name(..))
-        
-        if ndims == 1
-            x = indep_vars[1]
-            xleft, xright = domains[1]
-            push!(bcs, v(xleft) ~ bc)
-            push!(bcs, v(xright) ~ bc)
-        elseif ndims == 2
-            x, y = indep_vars
-            xleft, xright = domains[1]
-            yleft, yright = domains[2]
-            push!(bcs, v(xleft, y) ~ bc)
-            push!(bcs, v(xright, y) ~ bc)
-            push!(bcs, v(x, yleft) ~ bc)
-            push!(bcs, v(x, yright) ~ bc)
-        end
-    end
-    
-    return bcs
-end
-
-
-
-function expand_trig(eqn, t, omega, verbose=false)
-    y_exp = Symb.expand(Model.expand_derivatives(eqn))
-    symbolics_list = Symb.arguments(y_exp, +)
-    
-    println("Number of terms: ", length(symbolics_list))
-    
-    t_sympy = sp.symbols("t")
-    finished_terms = Num[]
-    
-    for (i, term) in enumerate(symbolics_list)
-            term_sympy = Symb.symbolics_to_sympy(term)
-            current_term = term_sympy.as_independent(t_sympy)[2]
-            fs = sp.sympy.fourier_series(current_term, (t_sympy, -sp.PI, sp.PI))
-            finished_sympy_term = fs.truncate() / current_term 
-            finished_symb_term = Symb.sympy_to_symbolics(finished_sympy_term, [t]) * symbolics_list[i]
-            push!(finished_terms, finished_symb_term)
-        println("Finished term $i")
-    end
-    
-    finished_terms = [Symb.simplify(term) for term in finished_terms]
-    return sum(finished_terms)
-end
 
 function expand_trig_jl(eqn, t, omega)
     y_exp = Symb.expand(Model.expand_derivatives(eqn))
@@ -92,11 +51,11 @@ function expand_trig_jl(eqn, t, omega)
     finished_terms = Num[]
     
     for (i, term) in enumerate(symbolics_list)
-        trig_terms = Num[]      # Typed
-        spatial_terms = Num[]   # Typed
+        trig_terms = Num[]
+        spatial_terms = Num[]
         
         for mul_term in Symb.arguments(term, *)
-            mul_term_num = Num(mul_term)  # Ensure Num type
+            mul_term_num = Num(mul_term)
             if contains_var(mul_term_num, t)
                 push!(trig_terms, mul_term_num)
             else
@@ -120,7 +79,7 @@ function expand_trig_jl(eqn, t, omega)
         # trig_func = x -> Symbolics.value(Symbolics.substitute(trig, t => x))
         period = 2π / omega
         F = AF.Fun(trig_func, AF.Fourier(-period/2 .. period/2))
-        coeffs = AF.coefficients(F)::Vector{Float64}  # Type assert
+        coeffs = AF.coefficients(F)::Vector{Float64}
         
         ωt = omega * t
         expanded_trig::Num = Num(0)
@@ -157,64 +116,43 @@ function make_residual(expanded, harmonics, omega, t)
 end
 
 
-using ModelingToolkit
-
-# Harmonic Balance solver using MethodOfLines -> very slow
-function solve_harmonicbalance(eqs, harmonics, bcs, domains, steps, vars, vars_symb, x0)
-    ndims = length(vars)
-    
-    domain_specs = [vars[i] ∈ Interval(domains[i]...) for i in 1:ndims]
-    
-    Model.@named pdesys = Model.PDESystem(eqs, bcs, domain_specs, collect(vars), vars_symb)
-    
-    disc_dict = [vars[i] => steps[i] for i in 1:ndims]
-    @time discretization = MOLFiniteDifference(disc_dict, nothing, approx_order=2)
-    
-    @time sys, tspan = SciMLBase.symbolic_discretize(pdesys, discretization)
-    sys::Model.System = Model.complete(sys)
-
-    unknowns::Vector{SymbolicUtils.BasicSymbolic{Real}} = Model.unknowns(sys)
-
-    
-    u0_map = Dict(unknowns .=> x0)
-    
-    @time prob = NonlinearProblem(sys, u0_map; discretization.kwargs...)
-    
-    @time sol = solve(prob_sparse, NewtonRaphson(; linsolve=KLUFactorization()))
-        
-    # @time sol = NonlinearSolve.solve(prob, NewtonRaphson(), reltol=1e-5, abstol=1e-5)
-
-    # Type the output
-    solution_coeffs = Matrix{Float64}[sol[vars_symb[i]] for i in 1:(2*harmonics)]
-    
-    return solution_coeffs
-end
-
-
-
-
 # Implementing with the custom stencil
 using MacroTools: prewalk, @capture
 using Symbolics: Differential
 
-function transform_sym(Nx::Int64, Ny::Int64)
+function transform_sym(Nx::Int64, Ny::Int64=0)
+    is_2D = Ny > 0
+    
     function aux(ex)
         prewalk(ex) do tmp
-            if @capture(tmp, Differential(x)(Differential(x)(s_(x, y))))
-                return :(($s[i+1] - 2*$s[i] + $s[i-1]) / dx^2)
-                
-            elseif @capture(tmp, Differential(y)(Differential(y)(s_(x, y))))
-                return :(($s[i+Nx+1] - 2*$s[i] + $s[i-Nx-1]) / dy^2)
-                
-            elseif @capture(tmp, Differential(x)(s_(x, y)))
-                return :(($s[i+1] - $s[i-1]) / (2*dx))
-                
-            elseif @capture(tmp, Differential(y)(s_(x, y)))
-                return :(($s[i+Nx+1] - $s[i-Nx-1]) / (2*dy))
-                
-            elseif @capture(tmp, s_(x, y))
-                return :($s[i])
-                
+            if is_2D
+                # 2D case
+                if @capture(tmp, Differential(x)(Differential(x)(s_(x, y))))
+                    return :(($s[i+1] - 2*$s[i] + $s[i-1]) / dx^2)
+                    
+                elseif @capture(tmp, Differential(y)(Differential(y)(s_(x, y))))
+                    return :(($s[i+$Nx+1] - 2*$s[i] + $s[i-$Nx-1]) / dy^2)
+                    
+                elseif @capture(tmp, Differential(x)(s_(x, y)))
+                    return :(($s[i+1] - $s[i-1]) / (2*dx))
+                    
+                elseif @capture(tmp, Differential(y)(s_(x, y)))
+                    return :(($s[i+$Nx+1] - $s[i-$Nx-1]) / (2*dy))
+                    
+                elseif @capture(tmp, s_(x, y))
+                    return :($s[i])
+                end
+            else
+                # 1D case
+                if @capture(tmp, Differential(x)(Differential(x)(s_(x,))))
+                    return :(($s[i+1] - 2*$s[i] + $s[i-1]) / dx^2)
+                    
+                elseif @capture(tmp, Differential(x)(s_(x,)))
+                    return :(($s[i+1] - $s[i-1]) / (2*dx))
+                    
+                elseif @capture(tmp, s_(x,))
+                    return :($s[i])
+                end
             end
             tmp
         end
@@ -222,34 +160,55 @@ function transform_sym(Nx::Int64, Ny::Int64)
     aux
 end
 
-function create_residual_function(Nx, Ny, eqs::Vector{Expr}, vars::Vector{Symbol})
+function create_residual_function(eqs::Vector{Expr}, vars::Vector{Symbol}, Nx::Int, Ny::Int=0)
     nvars = length(vars)
-    N = (Nx+1) * (Ny+1)
+    is_2D = Ny > 0
+    N = is_2D ? (Nx+1) * (Ny+1) : (Nx+1)
     
-    quote
-        function residual!(R, U, p)  # R instead of F
-            dx, dy = p
-            Nx = $Nx
-            
-            $([:($(vars[k]) = view(U, $((k-1)*N+1):$(k*N))) for k in 1:nvars]...)
-            $([:($(Symbol("R_", vars[k])) = view(R, $((k-1)*N+1):$(k*N))) for k in 1:nvars]...)
-            
-            for j in 1:$Ny+1
-                for ii in 1:$Nx+1
-                    i = ii + (j-1) * ($Nx+1)
-                    x = (ii-1) * dx
-                    y = (j-1) * dy
+    if is_2D
+        quote
+            function residual!(R, U, p)
+                dx, dy = p
+                Nx = $Nx
+                
+                $([:($(vars[k]) = view(U, $((k-1)*N+1):$(k*N))) for k in 1:nvars]...)
+                $([:($(Symbol("R_", vars[k])) = view(R, $((k-1)*N+1):$(k*N))) for k in 1:nvars]...)
+                
+                for j in 1:$Ny+1
+                    for ii in 1:$Nx+1
+                        i = ii + (j-1) * ($Nx+1)
+                        x = (ii-1) * dx
+                        y = (j-1) * dy
+                        
+                        if ii == 1 || ii == $Nx+1 || j == 1 || j == $Ny+1
+                            $([:($(Symbol("R_", vars[k]))[i] = $(vars[k])[i]) for k in 1:nvars]...)
+                        else
+                            $([:($(Symbol("R_", vars[k]))[i] = $(eqs[k])) for k in 1:nvars]...)
+                        end
+                    end
+                end
+                return R
+            end
+        end
+    else
+        quote
+            function residual!(R, U, p)
+                dx = p[1]
+                
+                $([:($(vars[k]) = view(U, $((k-1)*N+1):$(k*N))) for k in 1:nvars]...)
+                $([:($(Symbol("R_", vars[k])) = view(R, $((k-1)*N+1):$(k*N))) for k in 1:nvars]...)
+                
+                for i in 1:$Nx+1
+                    x = (i-1) * dx
                     
-                    if ii == 1 || ii == $Nx+1 || j == 1 || j == $Ny+1
+                    if i == 1 || i == $Nx+1
                         $([:($(Symbol("R_", vars[k]))[i] = $(vars[k])[i]) for k in 1:nvars]...)
                     else
                         $([:($(Symbol("R_", vars[k]))[i] = $(eqs[k])) for k in 1:nvars]...)
                     end
                 end
+                return R
             end
-            return R
         end
     end
 end
-
-
