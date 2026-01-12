@@ -160,10 +160,81 @@ function transform_sym(Nx::Int64, Ny::Int64=0)
     aux
 end
 
-function create_residual_function(eqs::Vector{Expr}, vars::Vector{Symbol}, Nx::Int, Ny::Int=0)
+function make_boundary_assignments_2D(vars, nvars)
+    assignments = Expr[]
+    for k in 1:nvars
+        R_var = Symbol("R_", vars[k])
+        var = vars[k]
+        push!(assignments, :($R_var[i] = $var[i]))
+    end
+    return assignments
+end
+
+
+function make_boundary_assignments_1D(vars, nvars, conds, interior_eqs)
+    left_assignments = Expr[]
+    right_assignments = Expr[]
+    
+    for k in 1:nvars
+        R_var = Symbol("R_", vars[k])
+        var = vars[k]
+        
+        # Left boundary
+        if haskey(conds, var) && conds[var][1] !== nothing
+            left_bc = conds[var][1]
+            push!(left_assignments, :($R_var[i] = $var[i] - $left_bc))
+        else
+            push!(left_assignments, :($R_var[i] = $(interior_eqs[k])))
+        end
+        
+        # Right boundary
+        if haskey(conds, var) && conds[var][2] !== nothing
+            right_bc = conds[var][2]
+            push!(right_assignments, :($R_var[i] = $var[i] - $right_bc))
+        else
+            push!(right_assignments, :($R_var[i] = $(interior_eqs[k])))
+        end
+    end
+    
+    return left_assignments, right_assignments
+end
+
+function make_interior_assignments(vars, eqs, nvars)
+    assignments = Expr[]
+    for k in 1:nvars
+        R_var = Symbol("R_", vars[k])
+        push!(assignments, :($R_var[i] = $(eqs[k])))
+    end
+    return assignments
+end
+
+function make_view_bindings(vars, nvars, N)
+    bindings = Expr[]
+    for k in 1:nvars
+        var = vars[k]
+        R_var = Symbol("R_", var)
+        start_idx = (k-1)*N + 1
+        end_idx = k*N
+        push!(bindings, :($var = view(U, $start_idx:$end_idx)))
+        push!(bindings, :($R_var = view(R, $start_idx:$end_idx)))
+    end
+    return bindings
+end
+
+function create_residual_function(eqs::Vector{Expr}, vars::Vector{Symbol}, Nx::Int, Ny::Int=0, conds::Dict=Dict())
     nvars = length(vars)
     is_2D = Ny > 0
     N = is_2D ? (Nx+1) * (Ny+1) : (Nx+1)
+    
+    view_bindings = make_view_bindings(vars, nvars, N)
+    interior_assignments = make_interior_assignments(vars, eqs, nvars)
+
+    if is_2D
+        boundary_assignments = make_boundary_assignments_2D(vars, nvars)
+    else
+        left_assignments, right_assignments = make_boundary_assignments_1D(vars, nvars, conds, eqs)
+    end
+    
     
     if is_2D
         quote
@@ -171,8 +242,7 @@ function create_residual_function(eqs::Vector{Expr}, vars::Vector{Symbol}, Nx::I
                 dx, dy = p
                 Nx = $Nx
                 
-                $([:($(vars[k]) = view(U, $((k-1)*N+1):$(k*N))) for k in 1:nvars]...)
-                $([:($(Symbol("R_", vars[k])) = view(R, $((k-1)*N+1):$(k*N))) for k in 1:nvars]...)
+                $(view_bindings...)
                 
                 for j in 1:$Ny+1
                     for ii in 1:$Nx+1
@@ -181,9 +251,9 @@ function create_residual_function(eqs::Vector{Expr}, vars::Vector{Symbol}, Nx::I
                         y = (j-1) * dy
                         
                         if ii == 1 || ii == $Nx+1 || j == 1 || j == $Ny+1
-                            $([:($(Symbol("R_", vars[k]))[i] = $(vars[k])[i]) for k in 1:nvars]...)
+                            $(boundary_assignments...)
                         else
-                            $([:($(Symbol("R_", vars[k]))[i] = $(eqs[k])) for k in 1:nvars]...)
+                            $(interior_assignments...)
                         end
                     end
                 end
@@ -195,16 +265,17 @@ function create_residual_function(eqs::Vector{Expr}, vars::Vector{Symbol}, Nx::I
             function residual!(R, U, p)
                 dx = p[1]
                 
-                $([:($(vars[k]) = view(U, $((k-1)*N+1):$(k*N))) for k in 1:nvars]...)
-                $([:($(Symbol("R_", vars[k])) = view(R, $((k-1)*N+1):$(k*N))) for k in 1:nvars]...)
+                $(view_bindings...)
                 
                 for i in 1:$Nx+1
                     x = (i-1) * dx
                     
-                    if i == 1 || i == $Nx+1
-                        $([:($(Symbol("R_", vars[k]))[i] = $(vars[k])[i]) for k in 1:nvars]...)
+                    if i == 1
+                        $(left_assignments...)
+                    elseif i == $Nx+1
+                        $(right_assignments...)
                     else
-                        $([:($(Symbol("R_", vars[k]))[i] = $(eqs[k])) for k in 1:nvars]...)
+                        $(interior_assignments...)
                     end
                 end
                 return R
