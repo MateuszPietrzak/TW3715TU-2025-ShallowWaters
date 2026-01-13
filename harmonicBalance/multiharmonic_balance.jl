@@ -20,7 +20,11 @@ function create_ansatz(coords::Tuple, t::Symbolics.Num, omega, harmonics::Int, n
         j = 1
         
         for i in 1:(2*harmonics)
-            name = Symbol(Char('A' + letter_idx - 1))
+            if isodd(i)
+                name = Symbol("A", div(i + 1, 2))
+            else
+                name = Symbol("B", div(i, 2))
+            end
             letter_idx += 1
             
             v = first(@variables $name(..))
