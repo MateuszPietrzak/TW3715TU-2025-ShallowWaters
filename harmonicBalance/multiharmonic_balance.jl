@@ -192,7 +192,8 @@ function make_boundary_assignments_1D(vars, nvars, conds, interior_eqs)
             right_bc = conds[var][2]
             push!(right_assignments, :($R_var[i] = $var[i] - $right_bc))
         else
-            push!(right_assignments, :($R_var[i] = $(interior_eqs[k])))
+            # Zero-gradient (Neumann) boundary condition when no BC specified
+            push!(right_assignments, :($R_var[i] = $var[i] - $var[i - 1]))
         end
     end
     
