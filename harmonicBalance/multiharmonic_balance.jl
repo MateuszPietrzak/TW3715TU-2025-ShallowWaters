@@ -109,10 +109,10 @@ function expand_trig_jl(eqn, t, omega)
 end
 
 function make_residual(expanded, harmonics, omega, t)
-    eqs = Num[]
+    eqs = []
     for i in 1:harmonics
-        sin_coef::Num = Symb.coeff(expanded, sin(i*omega*t))
-        cos_coef::Num = Symb.coeff(expanded, cos(i*omega*t))
+        sin_coef = Symb.coeff(expanded, sin(i*omega*t))
+        cos_coef = Symb.coeff(expanded, cos(i*omega*t))
         push!(eqs, sin_coef)
         push!(eqs, cos_coef)
     end
