@@ -18,12 +18,12 @@ function create_ansatz(coords::Tuple, t::Symbolics.Num, omega, harmonics::Int, n
     for field_idx in 1:n_fields
         u = Num(0)
         j = 1
-        
+        base_char = Char('A' + 2*(field_idx - 1))
         for i in 1:(2*harmonics)
             if isodd(i)
-                name = Symbol("A", div(i + 1, 2))
+                name = Symbol(Char(base_char), div(i + 1, 2))
             else
-                name = Symbol("B", div(i, 2))
+                name = Symbol(Char(base_char + 1), div(i, 2))
             end
             letter_idx += 1
             
