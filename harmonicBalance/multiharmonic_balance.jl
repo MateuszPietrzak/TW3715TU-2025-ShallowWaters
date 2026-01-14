@@ -184,20 +184,24 @@ function make_boundary_assignments_1D(vars, nvars, conds, interior_eqs)
         var = vars[k]
         
         # Left boundary
-        if haskey(conds, var) && conds[var][1] !== nothing
+        if haskey(conds, var) && isa(conds[var][1], Number)
             left_bc = conds[var][1]
             push!(left_assignments, :($R_var[i] = $var[i] - $left_bc))
-        else
-            push!(left_assignments, :($R_var[i] = $(interior_eqs[k])))
+        elseif haskey(conds, var) && conds[var][1] == "neumann"
+            push!(left_assignments, :($R_var[i] = $var[i + 1] - $var[i]))
+        elseif haskey(conds, var) && conds[var][1] == nothing
+            push!(left_assignments, :($R_var[i] = $interior_eqs))
         end
         
         # Right boundary
-        if haskey(conds, var) && conds[var][2] !== nothing
+        if haskey(conds, var) && isa(conds[var][2], Number)
             right_bc = conds[var][2]
             push!(right_assignments, :($R_var[i] = $var[i] - $right_bc))
-        else
+        elseif haskey(conds, var) && conds[var][2] == "neumann"
             # Zero-gradient (Neumann) boundary condition when no BC specified
             push!(right_assignments, :($R_var[i] = $var[i] - $var[i - 1]))
+        elseif haskey(conds, var) && conds[var][2] == nothing
+            push!(right_assignments, :($R_var[i] = $interior_eqs))
         end
     end
     
