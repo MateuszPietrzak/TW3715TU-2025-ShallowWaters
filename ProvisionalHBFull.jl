@@ -1,48 +1,168 @@
-using LinearAlgebra
-using SparseArrays
-using ModelingToolkit
-using MacroTools: @capture, postwalk, prewalk
-using DifferentialEquations
+import ModelingToolkit as Model
+using Symbolics
+using DomainSets
+import ApproxFun as AF
 using NonlinearSolve
+import DifferentialEquations as DE
+using MacroTools: @capture, postwalk, prewalk
+using SparseArrays
 using Plots
 
-xleft::Float64 = 0.0
-xright::Float64 = 1.0
-yleft::Float64 = 0.0
-yright::Float64 = 1.0
-N = 50
-harmonics = 1
-stepx = (xright-xleft)/(N-1)
-stepy = (yright-yleft)/(N-1)
 
-#Definition of constants (placeholders):
-gamma::Float64 = 10.0
-gamma_3::Float64 = 1.0
-c::Float64 = 10.0
-omega::Float64 = 1
 
-@parameters x, y, t
-@variables A1(..), B1(..)
-r1 = @rule cos(~x)^3 => 0.75 * cos(~x) + 0.25 * cos(3 * ~x)
-r2 = @rule sin(~x)^3 => 0.75 * sin(~x) - 0.25 * sin(3 * ~x)
-r3 = @rule cos(~x)^2 => 1 - sin(~x)^2
-r4 = @rule sin(~x)^2 => 1 - cos(~x)^2
+gamma = 1.0;
+omega = 0.8;
+gamma3 = 1.0;
+g0::Float64 = 9.80665; # m / s^2
+height = 5.0; # m
 
-u = A1(x, y) * sin(omega*t) + B1(x, y) * cos(omega*t)
-Dx = Differential(x)
-Dy = Differential(y)
-Dt = Differential(t)
-y_eq = Dt(Dt(u)) - c*c*(Dx(Dx(u)) + Dy(Dy(u))) + gamma*Dt(u) + gamma_3*Dt(u)*Dt(u)*Dt(u)
-y_exp = expand_derivatives(y_eq)
 
-y_exp = simplify(expand(y_exp), RuleSet([r1, r2, r3, r4]))
-y_exp = expand(y_exp)
-y_exp = simplify(y_exp, RuleSet([r1, r2, r3, r4]))
+xleft::Float64 = 0.0;
+xright::Float64 = 1.0;
+yleft = 0.0;
+yright = 1.0;
+Nt = 5
+N = Nx = Ny = 75;
+harmonics = 3; # number of harmonics
+order = 2;
+stepx = (xright-xleft)/Nx;
+stepy = (yright - yleft)/Ny;
+u0 = 250 * ones((Nx+1) * (Ny+1) * harmonics * 2);
+# N = (Nx+1) * (Ny+1);
 
-sin_coeff = Symbolics.coeff(y_exp, sin(omega*t))
-cos_coeff = Symbolics.coeff(y_exp, cos(omega*t))
 
-#println("Sin coeff: ", sin_coeff)
+# Define symbolics
+Model.@parameters x, y, t;
+
+const Dy = Model.Differential(y)
+const Dx = Model.Differential(x);
+const Dt = Model.Differential(t);
+
+
+function build_problem(x, y, t, omega, harmonics, xleft, xright, yleft, yright, gamma, gamma3)
+    vars, var_exprs, (u,) = create_ansatz((x, y), t, omega, harmonics);
+    F = 250 * exp(-40*(x^2)) * sin(omega*t);
+    pde::Symbolics.Num = Dt(Dt(u)) - 0.25*(Dx(Dx(u)) + Dy(Dy(u))) + gamma*Dt(u) + gamma3*Dt(u)*Dt(u)*Dt(u) - F;
+    return pde, var_exprs, vars;
+end
+
+function simplify_problem(pde, t, omega, harmonics, Nx, Ny, vars)
+    expanded = expand_trig_jl(pde, t, omega)
+    eqns = make_equations(expanded, harmonics, omega, t)
+    return eqns
+end
+
+
+function create_ansatz(coords::Tuple, t::Symbolics.Num, omega, harmonics::Int, n_fields::Int=1)
+    var_names = Symbol[]
+    var_exprs = Symbolics.Num[]
+    fields = Symbolics.Num[]
+
+    letter_idx = 1
+
+    for field_idx in 1:n_fields
+        u = Num(0)
+        j = 1
+
+        for i in 1:(2*harmonics)
+            if isodd(i)
+                name = Symbol("A", div(i + 1, 2))
+            else
+                name = Symbol("B", div(i, 2))
+            end
+            letter_idx += 1
+
+            v = first(@variables $name(..))
+            expr = v(coords...)
+
+            if isodd(i)
+                u += expr * sin(j * omega * t)
+            else
+                u += expr * cos(j * omega * t)
+                j += 1
+            end
+
+            push!(var_names, name)
+            push!(var_exprs, expr)
+        end
+
+        push!(fields, u)
+    end
+
+    return var_names, var_exprs, fields
+end
+
+
+function expand_trig_jl(eqn, t, omega)
+    y_exp = expand(Model.expand_derivatives(eqn))
+    symbolics_list = arguments(y_exp, +)
+    contains_var(expr, var) = any(v -> isequal(v, var), Symbolics.get_variables(expr))
+    finished_terms = Num[]
+
+    for (i, term) in enumerate(symbolics_list)
+        trig_terms = Num[]
+        spatial_terms = Num[]
+
+        for mul_term in arguments(term, *)
+            mul_term_num = Num(mul_term)
+            if contains_var(mul_term_num, t)
+                push!(trig_terms, mul_term_num)
+            else
+                push!(spatial_terms, mul_term_num)
+            end
+        end
+
+        spatial::Num = isempty(spatial_terms) ? Num(1) : prod(spatial_terms)
+
+        if length(trig_terms) == 1
+            unwrapped = Symbolics.unwrap(trig_terms[1])
+            if SymbolicUtils.operation(unwrapped) !== ^
+                push!(finished_terms, Num(term))
+            continue
+            end
+        end
+
+        trig::Num = isempty(trig_terms) ? Num(1) : prod(trig_terms)
+
+        trig_func = Symbolics.build_function(trig, t, expression=Val{false})
+        # trig_func = x -> Symbolics.value(Symbolics.substitute(trig, t => x))
+        period = 2π / omega
+        F = AF.Fun(trig_func, AF.Fourier(-period/2 .. period/2))
+        coeffs = AF.coefficients(F)::Vector{Float64}
+
+        ωt = omega * t
+        expanded_trig::Num = Num(0)
+
+        for (j, c) in enumerate(coeffs)
+            abs(c) < 1e-10 && continue
+
+            if j == 1
+                expanded_trig += c
+                elseif iseven(j)
+                n = j ÷ 2
+                expanded_trig += c * cos(n * ωt)
+            else
+                n = (j + 1) ÷ 2
+                expanded_trig += c * sin(n * ωt)
+            end
+        end
+
+        push!(finished_terms, spatial * -expanded_trig)
+    end
+
+    return sum(finished_terms)
+end
+
+function make_equations(expanded, harmonics, omega, t)
+    eqs = []
+    for i in 1:harmonics
+        sin_coef = Symbolics.coeff(expanded, sin(i*omega*t))
+        cos_coef = Symbolics.coeff(expanded, cos(i*omega*t))
+        push!(eqs, sin_coef)
+        push!(eqs, cos_coef)
+    end
+    return eqs
+end
 
 function transform_sym(ex)
     return prewalk(ex) do instr
@@ -64,18 +184,27 @@ function transform_sym(ex)
             letter = id[1]
             number = parse(Int, id[2:end])
             return :($(Symbol("$(letter)_array"))[$(i), $(j), $(number)])
+        elseif @capture(instr, x)
+            return :(i * dx)
+        elseif @capture(instr, y)
+            return :(j * dy)
         end
         return instr
     end
 end
 
 function transform_sym_coeff(ex)
+    if !isa(ex, Expr) return ex end
     return prewalk(ex) do instr
         if @capture(instr, s_(x, y))
             id = string(s)
             letter = id[1]
             number = parse(Int, id[2:end])
             return :($(Symbol("$(letter)_array"))[i, j, $(number)])
+        elseif @capture(instr, x)
+            return :(i * dx)
+        elseif @capture(instr, y)
+            return :(j * dy)
         end
         return instr
     end
@@ -88,14 +217,7 @@ function create_residual_function(N, equationsExpr, harmonics)
     println(harmonics)
 
     for H in 1:harmonics
-        if H == 1
-            #F_view[2*H - 1][i, j] = $(equationsExpr[2*H - 1]) - 1000 * c^2 * exp(-40*(i * dx)^2)
-            push!(equationsExprMapped, :(F_view[i, j,1,$(H)] = $(equationsExpr[2*H - 1]) - 1000 * c^2 * exp(-40*(i * dx)^2))) # Related to equationsExpr[2*H-1]
-        else
-            #F_view[2*H - 1][i, j] = $(equationsExpr[2*H - 1])
-            push!(equationsExprMapped, :(F_view[i, j,1,$(H)] = $(equationsExpr[2*H - 1]))) # Related to equationsExpr[2*H-1]
-        end
-        #F_view[2*H][i, j] = $(equationsExpr[2*H])
+        push!(equationsExprMapped, :(F_view[i, j,1,$(H)] = $(equationsExpr[2*H - 1]))) # Related to equationsExpr[2*H-1]
         push!(equationsExprMapped, :(F_view[i, j,2,$(H)] = $(equationsExpr[2*H]))) # Related to equationsExpr[2*H]
 
     end
@@ -136,19 +258,40 @@ function create_residual_function(N, equationsExpr, harmonics)
     return res
 end
 
+function always_expr(s::String)
+    e = Meta.parse(s)
+    return isa(e, Expr) ? e : :($e)
+end
 
 function create_jac_blocks(equations, amplitudes, harmonicsNum)
-    DiffMat = Vector{Expr}(undef, (2*harmonicsNum)^2)
-    LaplCoeff = Vector{Union{Expr,Float64}}(undef, ((2*harmonicsNum)^2)*2)
+    DiffMat = Vector{Union{Expr, Float64, Int64}}(undef, (2*harmonicsNum)^2)
+    LaplCoeff = Vector{Union{Expr, Float64, Int64}}(undef, ((2*harmonicsNum)^2)*2)
     for i in 1:2*harmonicsNum
         for j in 1:2*harmonicsNum
             index = (i-1)*2*harmonicsNum + j
-            DiffMat[index] = transform_sym_coeff(Meta.parse(string(expand_derivatives(Differential(amplitudes[j])(equations[i])))))
-            LaplCoeff[index*2 - 1] = transform_sym_coeff(Meta.parse(string(Symbolics.coeff(equations[i], Differential(x)(Differential(x)(amplitudes[j]))))))
-            LaplCoeff[index*2] = transform_sym_coeff(Meta.parse(string(Symbolics.coeff(equations[i], Differential(y)(Differential(y)(amplitudes[j]))))))
+            temp = Meta.parse(string(expand_derivatives(Differential(amplitudes[j])(equations[i]))))
+            println("___________________________")
+            println(temp)
+            println("___________________________")
+            temp2 = transform_sym_coeff(temp)
+            DiffMat[index] = temp2
+
+            temp = always_expr(string(Symbolics.coeff(equations[i], Differential(x)(Differential(x)(amplitudes[j])))))
+            LaplCoeff[index*2 - 1] = transform_sym_coeff(temp)
+            temp = always_expr(string(Symbolics.coeff(equations[i], Differential(y)(Differential(y)(amplitudes[j])))))
+            LaplCoeff[index*2] = transform_sym_coeff(temp)
         end
     end
     return DiffMat, LaplCoeff
+end
+
+
+function create_discretized(equations, harmonicsNum)
+    equationsExpr = Vector{Expr}(undef, 2*harmonicsNum)
+    for i in 1:2*harmonicsNum
+            equationsExpr[i] = transform_sym(always_expr(string(equations[i])))
+    end
+    return equationsExpr
 end
 
 
@@ -169,8 +312,6 @@ function create_jacobian_function(N, DiffMat, LaplCoeff, harmonics)
         end
     end
 
-    println(equationsExprMapped)
-
     function_code = quote
         function jacobian!(J, U, p)
             dx, dy = p
@@ -183,7 +324,7 @@ function create_jacobian_function(N, DiffMat, LaplCoeff, harmonics)
             Jmat = spzeros(2*grid_size*harmonicsNum, 2*grid_size*harmonicsNum)
 
             #Boundary conditions (easier to write over all diagonal points, then overwrite later):
-            for k in 1:2*grid_size
+            for k in 1:2*grid_size*harmonicsNum
                 Jmat[k,k] = 1
             end
 
@@ -207,29 +348,35 @@ function create_jacobian_function(N, DiffMat, LaplCoeff, harmonics)
     return eval(function_code)
 end
 
-equations = (sin_coeff, cos_coeff)
-amplitudes = (A1(x, y), B1(x, y))
-DiffMat, LaplCoeff = create_jac_blocks(equations, amplitudes, harmonics)
+
+pde, var_exprs, vars = build_problem(x, y, t, omega, harmonics, xleft, xright, yleft, yright, gamma, gamma3)
+equations = simplify_problem(pde, t, omega, harmonics, Nx, Ny, vars)
+equationsExpr = create_discretized(equations, harmonics)
+println(equationsExpr[1])
+println("_____________________________")
+println(equationsExpr[2])
+println("_____________________________")
+DiffMat, LaplCoeff = create_jac_blocks(equations, var_exprs, harmonics)
 
 
-sin_ex = transform_sym(Meta.parse(string(sin_coeff)))
-cos_ex = transform_sym(Meta.parse(string(cos_coeff)))
-
-equationsExpr = (sin_ex, cos_ex)
-
-
-println(sin_coeff)
 
 println(DiffMat[1])
+println("_____________________________")
 println(DiffMat[2])
+println("_____________________________")
 println(DiffMat[3])
+println("_____________________________")
 println(DiffMat[4])
+println("_____________________________")
 
 println(LaplCoeff[3])
 
 
+
+
+
 nonlinear_residual = create_residual_function(N, equationsExpr, harmonics)
-initial_guess = ones(2*N*N)
+initial_guess = zeros(2*N*N*harmonics)
 par = [stepx, stepy]
 jacobian = create_jacobian_function(N, DiffMat, LaplCoeff, harmonics)
 
@@ -238,7 +385,7 @@ nonlinear_function = NonlinearFunction(nonlinear_residual, jac=jacobian)
 
 prob = NonlinearProblem(nonlinear_function, initial_guess, par)
 println("Starting nonlinear solver...")
-@time sol = NonlinearSolve.solve(prob, NewtonRaphson(), reltol = 1e-5, abstol = 1e-5)
+@time sol = NonlinearSolve.solve(prob, NewtonRaphson(), reltol = 1e-5, abstol = 1e-5, maxiters=10)
 println("Nonlinear solver finished!")
 
 #print(sol.u)
