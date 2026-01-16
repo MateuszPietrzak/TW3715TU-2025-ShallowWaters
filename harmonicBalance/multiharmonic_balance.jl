@@ -7,6 +7,7 @@ using DomainSets
 import ApproxFun as AF
 import DifferentialEquations as DE
 using Symbolics
+using SparseArrays
 
 function create_ansatz(coords::Tuple, t::Symbolics.Num, omega, harmonics::Int, n_fields::Int=1)
     var_names = Symbol[]
@@ -108,7 +109,7 @@ function expand_trig_jl(eqn, t, omega)
     return sum(finished_terms)
 end
 
-function make_residual(expanded, harmonics, omega, t)
+function make_equations(expanded, harmonics, omega, t)
     eqs = []
     for i in 1:harmonics
         sin_coef = Symb.coeff(expanded, sin(i*omega*t))
@@ -321,4 +322,95 @@ function create_residual_function(eqs::Vector{Expr}, vars::Vector{Symbol}, Nx::I
             end
         end
     end
+end
+
+function transform_sym_coeff(ex)
+    if !isa(ex, Expr) return ex end
+    return prewalk(ex) do instr
+        if @capture(instr, s_(x))
+            id = string(s)
+            letter = id[1]
+            number = parse(Int, id[2:end])
+            return :($(Symbol("$(letter)_array"))[i, $(number)])
+        elseif @capture(instr, x)
+            return :(i * dx)
+        end
+        return instr
+    end
+end
+
+
+function create_jac_blocks(equations, amplitudes, harmonicsNum)
+    DiffMat = Vector{Union{Expr, Float64, Int64}}(undef, (2*harmonicsNum)^2)
+    LaplCoeff = Vector{Union{Expr, Float64, Int64}}(undef, ((2*harmonicsNum)^2)*2)
+    for i in 1:2*harmonicsNum
+        for j in 1:2*harmonicsNum
+            index = (i-1)*2*harmonicsNum + j
+            temp = Meta.parse(string(expand_derivatives(Differential(amplitudes[j])(equations[i]))))
+            # println("___________________________")
+            # println(temp)
+            # println("___________________________")
+            temp2 = transform_sym_coeff(temp)
+            DiffMat[index] = temp2
+
+            temp = always_expr(string(Symbolics.coeff(equations[i], Differential(x)(Differential(x)(amplitudes[j])))))
+            LaplCoeff[index*2 - 1] = transform_sym_coeff(temp)
+            temp = always_expr(string(Symbolics.coeff(equations[i], Differential(y)(Differential(y)(amplitudes[j])))))
+            LaplCoeff[index*2] = transform_sym_coeff(temp)
+        end
+    end
+    return DiffMat, LaplCoeff
+end
+
+
+function always_expr(s::String)
+    e = Meta.parse(s)
+    return isa(e, Expr) ? e : :($e)
+end
+
+function create_jacobian_function(N, DiffMat, LaplCoeff, harmonics)
+    equationsExprMapped::Vector{Expr} = []
+
+    for HEq in 0:2*harmonics-1
+        for HHar in 1:2*harmonics
+            push!(equationsExprMapped, :(Jmat[idx + $(HEq)*grid_size, idx + $(HHar-1)*grid_size] = $(DiffMat[2*HEq*harmonics+HHar]) - 2*$(LaplCoeff[2*(2*HEq*harmonics+HHar)-1])/(dx^2)))
+
+            push!(equationsExprMapped, :(Jmat[idx + $(HEq)*grid_size, idx + $(HHar-1)*grid_size - 1] = $(LaplCoeff[2*(2*HEq*harmonics+HHar)-1])/(dx^2)))
+
+            push!(equationsExprMapped, :(Jmat[idx + $(HEq)*grid_size, idx + $(HHar-1)*grid_size + 1] = $(LaplCoeff[2*(2*HEq*harmonics+HHar)-1])/(dx^2)))
+        end
+    end
+
+    function_code = quote
+        function jacobian!(J, U, p)
+            dx = p[1]
+            grid_size = $N
+            harmonicsNum = $(harmonics)
+
+            A_array = reshape(@view(U[1:harmonicsNum*grid_size]), $N, harmonicsNum)
+            B_array = reshape(@view(U[harmonicsNum*grid_size+1:2*harmonicsNum*grid_size]), $N, harmonicsNum)
+
+            Jmat = spzeros(2*grid_size*harmonicsNum, 2*grid_size*harmonicsNum)
+
+            #Boundary conditions (easier to write over all diagonal points, then overwrite later):
+            for k in 1:2*grid_size*harmonicsNum
+                Jmat[k,k] = 1
+            end
+
+            #Inner points:
+            for i in 2:$(N-1)
+                idx = i
+                $(equationsExprMapped...)
+            end
+
+            if typeof(J) === typeof(Jmat)
+                copy!(J, Jmat)
+            else
+                J .= Jmat
+            end
+
+            return J
+        end
+    end
+    return eval(function_code)
 end
