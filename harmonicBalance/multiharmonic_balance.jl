@@ -124,6 +124,32 @@ end
 using MacroTools: prewalk, @capture
 using Symbolics: Differential
 
+function transform_boundaries(equation, bound)
+    is_2D = false
+    
+    function aux(ex)
+        prewalk(ex) do tmp
+            if is_2D
+                # 2D case
+                return ex
+            else
+                # 1D case
+                if bound == 1
+                    if @capture(tmp, s_[i-1])
+                        return 0
+                    end
+                else 
+                    if @capture(tmp, s_[i+1])
+                        return 0
+                    end
+                end
+            end
+            tmp
+        end
+    end
+    aux(equation)
+end
+
 function transform_sym(Nx::Int64, Ny::Int64=0)
     is_2D = Ny > 0
     
@@ -190,7 +216,9 @@ function make_boundary_assignments_1D(vars, nvars, conds, interior_eqs)
         elseif haskey(conds, var) && conds[var][1] == "neumann"
             push!(left_assignments, :($R_var[i] = $var[i + 1] - $var[i]))
         elseif haskey(conds, var) && conds[var][1] == nothing
-            push!(left_assignments, :($R_var[i] = $interior_eqs))
+            boundary_eqs = transform_boundaries(interior_eqs[k], 1)
+            
+            push!(left_assignments, :($R_var[i] = $(boundary_eqs)))
         end
         
         # Right boundary
@@ -201,7 +229,9 @@ function make_boundary_assignments_1D(vars, nvars, conds, interior_eqs)
             # Zero-gradient (Neumann) boundary condition when no BC specified
             push!(right_assignments, :($R_var[i] = $var[i] - $var[i - 1]))
         elseif haskey(conds, var) && conds[var][2] == nothing
-            push!(right_assignments, :($R_var[i] = $interior_eqs))
+            boundary_eqs = transform_boundaries(interior_eqs[k], 2)
+
+            push!(right_assignments, :($R_var[i] = $(boundary_eqs)))
         end
     end
     
