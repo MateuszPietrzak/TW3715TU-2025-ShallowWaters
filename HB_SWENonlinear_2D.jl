@@ -288,7 +288,7 @@ v = fields[3];
 #         Dt(u) + g * Dx(eta) + u * Dx(u) + v * Dy(u) + Cd * u * (u^2 + v^2)/(height + eta),
 #         Dt(v) + g * Dy(eta) + u * Dx(v) + v * Dy(v) + Cd * v * (u^2 + v^2)/(height + eta)];
 
-pdes = [Dt(eta) + height * Dx(u) * (height + eta) + height * Dy(v) * (height + eta) - 0.1*(Dx(Dx(eta)) + Dy(Dy(eta))),
+pdes = [Dt(eta) + height * Dx(u) * (height + eta) + height * Dy(v) * (height + eta) + 0.1*(Dx(Dx(eta)) + Dy(Dy(eta))),
         Dt(u) + g * Dx(eta) + u * Dx(u) + v * Dy(u) + Cd * u * (u^2 + v^2)/height,
         Dt(v) + g * Dy(eta) + u * Dx(v) + v * Dy(v) + Cd * v * (u^2 + v^2)/height];
 
