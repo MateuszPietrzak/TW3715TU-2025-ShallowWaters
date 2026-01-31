@@ -282,7 +282,7 @@ eta = fields[1];
 u = fields[2];
 v = fields[3];
 
-pdes = [Dt(eta) + height * Dx(u) + height * Dy(v) - 0.5*(Dx(Dx(eta)) + Dy(Dy(eta))),
+pdes = [Dt(eta) + height * Dx(u) + height * Dy(v) + 0.5*(Dx(Dx(eta)) + Dy(Dy(eta))),
         Dt(u) + g * Dx(eta),
         Dt(v) + g * Dy(eta)];
 
